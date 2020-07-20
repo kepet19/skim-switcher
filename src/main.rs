@@ -41,7 +41,6 @@ fn main() {
     let items = item_reader.of_bufread(Cursor::new(input));
 
     let options = SkimOptionsBuilder::default()
-        .height(Some("50%"))
         .multi(false)
         .build()
         .unwrap();
