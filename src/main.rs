@@ -1,60 +1,55 @@
-extern crate skim;
-use i3ipc::reply::Node;
-use i3ipc::I3Connection;
 use itertools::Itertools;
-use skim::prelude::*;
-use std::env;
-use std::io::Cursor;
+use skim::{AnsiString, prelude::*};
+use swayipc::{reply::Node, Connection};
 
 fn main() {
-    let mut ipc = I3Connection::connect().expect("failed to connect");
-    let tree = ipc.get_tree().unwrap();
-    let i3node: &Node = tree.nodes.get(1).unwrap();
-    let workspaces: &Vec<Node> = &i3node.nodes;
+    // Makes a channel to send items
+    let (tx_item, rx_item): (SkimItemSender, SkimItemReceiver) = unbounded();
 
-    // "consume" the values returned by the functions and digest them into a new String.
-    // See https://stackoverflow.com/questions/40792801/best-way-to-concatenate-vectors-in-rust
-    let all_choices: String = running_programs(workspaces)
+    let mut ipc = Connection::new().unwrap();
+    let tree = &ipc.get_tree().unwrap();
+    let nodes = &tree.nodes.get(1).unwrap();
+
+    get_running_programs_from(&nodes.nodes)
         .into_iter()
-        .chain(launchable_programs(path()).into_iter())
-        .map(|program| format!("{}\n", program))
-        .collect();
+        .for_each(|item| {
+            let _ = tx_item.send(Arc::new(item));
+        });
 
-    // `SkimItemReader` is a helper to turn any `BufRead` into a stream of `SkimItem`
-    // `SkimItem` was implemented for `AsRef<str>` by default
-    let items = SkimItemReader::default().of_bufread(Cursor::new(all_choices));
-    let options = SkimOptionsBuilder::default().multi(false).build().unwrap();
+    get_launchable_programs().into_iter().for_each(|item| {
+        let _ = tx_item.send(Arc::new(item));
+    });
+
+    //We drop the tranmssion pipe, so skim does know too stop listing after more items
+    drop(tx_item);
+
+    let options = SkimOptionsBuilder::default()
+        .multi(false)
+        .preview(Some(""))
+        .build()
+        .unwrap();
 
     // `run_with` would read and show items from the stream
-    let item = Skim::run_with(&options, Some(items))
+    let item = Skim::run_with(&options, Some(rx_item))
         .map(|out| out.selected_items)
         .unwrap_or_else(|| Vec::new());
 
-    let command = item.get(0).unwrap().output();
-    let mut command = command.split(" ");
+    let item = item.get(0).expect("You did not select anyitems").to_owned();
 
-    if command.next().unwrap().contains("Window:") {
-        let command = format!("[title=\"{}\"] focus", command.next().unwrap());
-        ipc.run_command(&command).unwrap();
-    } else {
-        let command = format!("exec {}", command.next().unwrap());
-        ipc.run_command(&command).unwrap();
-    }
+    let command: &SwitchType = (*item)
+        .as_any()
+        .downcast_ref()
+        .expect("Something wrong with downcast ");
+
+    let _ = match command {
+        SwitchType::Launch(name) => ipc.run_command(&format!("exec {}", name)).unwrap(),
+        SwitchType::Focus(name) => ipc
+            .run_command(&format!("[title=\"{}\"] focus", name))
+            .unwrap(),
+    };
 }
 
-fn path() -> Vec<String> {
-    env::var_os("PATH")
-        .unwrap_or_default()
-        .to_str()
-        .unwrap_or_default()
-        .split(":")
-        .map(|path| path.to_string())
-        .into_iter()
-        .sorted()
-        .collect::<Vec<String>>()
-}
-
-fn running_programs(workspaces: &Vec<Node>) -> Vec<String> {
+fn get_running_programs_from(workspaces: &Vec<Node>) -> Vec<SwitchType> {
     let choices: Vec<&Node> = workspaces
         .iter()
         .flat_map(|workspace| &workspace.nodes)
@@ -67,23 +62,68 @@ fn running_programs(workspaces: &Vec<Node>) -> Vec<String> {
 
     choices
         .iter()
-        .map(|program| format!("Window: {}", program))
+        .map(|program| SwitchType::Focus(program.to_owned()))
+        .collect::<Vec<SwitchType>>()
+}
+
+fn path() -> Vec<String> {
+    std::env::var_os("PATH")
+        .unwrap_or_default()
+        .to_str()
+        .unwrap_or_default()
+        .split(":")
+        .map(|path| path.to_string())
+        .into_iter()
+        .sorted()
+        .dedup()
         .collect::<Vec<String>>()
 }
 
-fn launchable_programs(dirs: Vec<String>) -> Vec<String> {
-    dirs
-        .iter()
+fn get_launchable_programs() -> Vec<SwitchType> {
+    let dirs = path();
+    dirs.iter()
         .map(|path| std::fs::read_dir(path))
         .filter(|dir| dir.is_ok())
         .map(|dir| {
             dir.unwrap()
                 .map(|dir_entry| dir_entry.unwrap().file_name().to_str().unwrap().to_owned())
-                .map(|program| format!("Launch: {}", program))
-                .collect::<Vec<String>>()
+                .map(|program| SwitchType::Launch(program))
+                .collect::<Vec<SwitchType>>()
         })
         .flatten()
-        .sorted()
-        .dedup()
-        .collect::<Vec<String>>()
+        .collect::<Vec<SwitchType>>()
+}
+
+enum SwitchType {
+    Launch(String),
+    Focus(String),
+}
+
+impl SkimItem for SwitchType {
+    fn display(&self) -> Cow<AnsiString> {
+        match &self {
+            SwitchType::Launch(name) => {
+                Cow::Owned(AnsiString::parse(&format!("\x1b[32m{}\x1b[m", name)))
+            }
+            SwitchType::Focus(name) => {
+                Cow::Owned(AnsiString::parse(&format!("\x1b[4m\x1b[34m{}\x1b[m", name)))
+            }
+        }
+    }
+    fn text(&self) -> Cow<str> {
+        match &self {
+            SwitchType::Launch(name) => Cow::Borrowed(name),
+            SwitchType::Focus(name) => Cow::Borrowed(name),
+        }
+    }
+    fn preview(&self) -> ItemPreview {
+        match &self {
+            SwitchType::Launch(name) => {
+                ItemPreview::AnsiText(format!("\x1b[4m\x1b[32mLaunch:\x1b[m\n{}", name))
+            }
+            SwitchType::Focus(name) => {
+                ItemPreview::AnsiText(format!("\x1b[4m\x1b[34mFocus:\x1b[m\n{}", name))
+            }
+        }
+    }
 }
