@@ -98,9 +98,19 @@ impl SwitchType {
     fn action(&self, ipc: &mut Connection) {
         match self {
             SwitchType::Launch(name) => ipc.run_command(&format!("exec {}", name)).unwrap(),
-            SwitchType::Focus(name) => ipc
-                .run_command(&format!("[title=\"{}\"] focus", name))
-                .unwrap(),
+            SwitchType::Focus(name) => {
+                let temp: String = name
+                    .text()
+                    .chars()
+                    .map(|chars| match chars {
+                        '(' => "\\(".to_string(),
+                        ')' => "\\)".to_string(),
+                        _ => chars.to_string(),
+                    })
+                    .collect();
+                ipc.run_command(&format!("[title=\"{}\"] focus", temp))
+                    .unwrap()
+            }
         };
     }
 }
