@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use skim::{AnsiString, prelude::*};
+use skim::{prelude::*, AnsiString};
 use swayipc::{reply::Node, Connection};
 
 fn main() {
@@ -25,7 +25,7 @@ fn main() {
 
     let options = SkimOptionsBuilder::default()
         .multi(false)
-        .preview(Some(""))
+        // .preview(Some(""))
         .build()
         .unwrap();
 
@@ -41,12 +41,7 @@ fn main() {
         .downcast_ref()
         .expect("Something wrong with downcast ");
 
-    let _ = match command {
-        SwitchType::Launch(name) => ipc.run_command(&format!("exec {}", name)).unwrap(),
-        SwitchType::Focus(name) => ipc
-            .run_command(&format!("[title=\"{}\"] focus", name))
-            .unwrap(),
-    };
+    command.action(&mut ipc);
 }
 
 fn get_running_programs_from(workspaces: &Vec<Node>) -> Vec<SwitchType> {
@@ -97,6 +92,17 @@ fn get_launchable_programs() -> Vec<SwitchType> {
 enum SwitchType {
     Launch(String),
     Focus(String),
+}
+
+impl SwitchType {
+    fn action(&self, ipc: &mut Connection) {
+        match self {
+            SwitchType::Launch(name) => ipc.run_command(&format!("exec {}", name)).unwrap(),
+            SwitchType::Focus(name) => ipc
+                .run_command(&format!("[title=\"{}\"] focus", name))
+                .unwrap(),
+        };
+    }
 }
 
 impl SkimItem for SwitchType {
