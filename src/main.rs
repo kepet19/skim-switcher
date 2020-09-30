@@ -7,14 +7,18 @@ fn main() {
     let (tx_item, rx_item): (SkimItemSender, SkimItemReceiver) = unbounded();
 
     let mut ipc = Connection::new().unwrap();
-    let tree = &ipc.get_tree().unwrap();
-    let nodes = &tree.nodes.get(1).unwrap();
+    match ipc.get_tree() {
+        Ok(tree) => {
+            let nodes = &tree.nodes.get(1).unwrap();
 
-    get_running_programs_from(&nodes.nodes)
-        .into_iter()
-        .for_each(|item| {
-            let _ = tx_item.send(Arc::new(item));
-        });
+            get_running_programs_from(&nodes.nodes)
+                .into_iter()
+                .for_each(|item| {
+                    let _ = tx_item.send(Arc::new(item));
+                });
+        },
+        Err(_) => {print!("application switcher does not work on i3 sorry\n");},
+    }
 
     get_launchable_programs().into_iter().for_each(|item| {
         let _ = tx_item.send(Arc::new(item));
