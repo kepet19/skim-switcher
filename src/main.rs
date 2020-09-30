@@ -52,7 +52,9 @@ fn get_running_programs_from(workspaces: &Vec<Node>) -> Vec<SwitchType> {
 
     let choices: Vec<String> = choices
         .into_iter()
-        .map(|program| program.name.as_ref().unwrap().to_owned())
+        .map(|program| program.name.as_ref())
+        .flatten()
+        .map(|program| program.to_owned())
         .collect();
 
     choices
