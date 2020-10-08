@@ -111,6 +111,7 @@ impl SwitchType {
                     .map(|chars| match chars {
                         '(' => "\\(".to_string(),
                         ')' => "\\)".to_string(),
+                        ':' => "\\:".to_string(),
                         _ => chars.to_string(),
                     })
                     .collect();
