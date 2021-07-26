@@ -7,22 +7,23 @@ fn main() {
     let (tx_item, rx_item): (SkimItemSender, SkimItemReceiver) = unbounded();
 
     let mut ipc = Connection::new().unwrap();
-    match ipc.get_tree() {
-        Ok(tree) => {
-            let nodes = &tree.nodes.get(1).unwrap();
+    if let Ok(tree) = ipc.get_tree() {
+        let nodes = &tree.nodes.get(1).unwrap();
 
-            get_running_programs_from(&nodes.nodes)
-                .into_iter()
-                .for_each(|item| {
-                    let _ = tx_item.send(Arc::new(item));
-                });
-        },
-        Err(_) => {print!("application switcher does not work on i3 sorry\n");},
+        get_running_programs_from(&nodes.nodes)
+            .into_iter()
+            .for_each(|item| {
+                let _ = tx_item.send(Arc::new(item));
+            });
+    } else {
+        print!("application switcher does not work on i3 sorry\n");
     }
 
-    get_launchable_programs().into_iter().for_each(|item| {
-        let _ = tx_item.send(Arc::new(item));
-    });
+    get_launchable_programs(&path())
+        .into_iter()
+        .for_each(|item| {
+            let _ = tx_item.send(Arc::new(item));
+        });
 
     //We drop the tranmssion pipe, so skim does know too stop listing after more items
     drop(tx_item);
@@ -80,9 +81,9 @@ fn path() -> Vec<String> {
         .collect::<Vec<String>>()
 }
 
-fn get_launchable_programs() -> Vec<SwitchType> {
-    let dirs = path();
-    dirs.iter()
+fn get_launchable_programs(paths: &Vec<String>) -> Vec<SwitchType> {
+    paths
+        .iter()
         .map(|path| std::fs::read_dir(path))
         .filter(|dir| dir.is_ok())
         .map(|dir| {
@@ -92,9 +93,12 @@ fn get_launchable_programs() -> Vec<SwitchType> {
                 .collect::<Vec<SwitchType>>()
         })
         .flatten()
+        .sorted()
+        .dedup()
         .collect::<Vec<SwitchType>>()
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum SwitchType {
     Launch(String),
     Focus(String),
