@@ -1,74 +1,53 @@
+use env_logger::{init_from_env, Env};
 use itertools::Itertools;
+use log::{error, info};
 use skim::{prelude::*, AnsiString};
-use swayipc::{reply::Node, Connection};
+use swayipc::Connection;
 
 fn main() {
-    // Makes a channel to send items
+    init_from_env(Env::default().filter_or("SKIM_LOG", "info"));
+
+    let mut connection = Connection::new().expect("Does sway run?");
+
     let (tx_item, rx_item): (SkimItemSender, SkimItemReceiver) = unbounded();
 
-    let mut ipc = Connection::new().unwrap();
-    if let Ok(tree) = ipc.get_tree() {
-        let nodes = &tree.nodes.get(1).unwrap();
-
-        get_running_programs_from(&nodes.nodes)
-            .into_iter()
-            .for_each(|item| {
-                let _ = tx_item.send(Arc::new(item));
-            });
-    } else {
-        print!("application switcher does not work on i3 sorry\n");
-    }
-
-    get_launchable_programs(&path())
-        .into_iter()
-        .for_each(|item| {
-            let _ = tx_item.send(Arc::new(item));
-        });
-
+    get_running_programs_from_sway(&mut connection, &tx_item);
+    get_launchable_programs(&get_paths_to_bin(), &tx_item);
     //We drop the tranmssion pipe, so skim does know too stop listing after more items
     drop(tx_item);
 
-    let options = SkimOptionsBuilder::default()
-        .multi(false)
-        // .preview(Some(""))
-        .build()
-        .unwrap();
+    if let Ok(options) = SkimOptionsBuilder::default().multi(false).build() {
+        // `run_with` would read and show items from the stream
+        let item = Skim::run_with(&options, Some(rx_item))
+            .map(|out| out.selected_items)
+            .unwrap_or_else(|| Vec::new());
 
-    // `run_with` would read and show items from the stream
-    let item = Skim::run_with(&options, Some(rx_item))
-        .map(|out| out.selected_items)
-        .unwrap_or_else(|| Vec::new());
-
-    let item = item.get(0).expect("You did not select anyitems").to_owned();
-
-    let command: &SwitchType = (*item)
-        .as_any()
-        .downcast_ref()
-        .expect("Something wrong with downcast ");
-
-    command.action(&mut ipc);
+        if let Some(item) = item.get(0) {
+            if let Some(command) = (**item).as_any().downcast_ref::<SwitchType>() {
+                command.action(&mut connection);
+            } else {
+                error!("Can't cast to SwitchType");
+            }
+        } else {
+            info!("Please select a item");
+        }
+    }
 }
 
-fn get_running_programs_from(workspaces: &Vec<Node>) -> Vec<SwitchType> {
-    let choices: Vec<&Node> = workspaces
+fn get_running_programs_from_sway(connection: &mut Connection, sender: &SkimItemSender) {
+    let tree = connection.get_tree().expect("No tree en sway");
+    tree.nodes
         .iter()
         .flat_map(|workspace| &workspace.nodes)
-        .collect();
-
-    let choices: Vec<String> = choices
-        .into_iter()
-        .map(|program| program.name.as_ref())
-        .flatten()
-        .map(|program| program.to_owned())
-        .collect();
-
-    choices
-        .iter()
-        .map(|program| SwitchType::Focus(program.to_owned()))
-        .collect::<Vec<SwitchType>>()
+        .flat_map(|workspace_node| &workspace_node.nodes)
+        // .flat_map(|maybe_program| maybe_program.name.as_ref())
+        .map(|program| SwitchType::Focus(program.app_id.clone(), program.name.clone()))
+        .for_each(|switcher| {
+            let _ = sender.send(Arc::new(switcher));
+        });
 }
 
-fn path() -> Vec<String> {
+fn get_paths_to_bin() -> Vec<String> {
     std::env::var_os("PATH")
         .unwrap_or_default()
         .to_str()
@@ -81,7 +60,7 @@ fn path() -> Vec<String> {
         .collect::<Vec<String>>()
 }
 
-fn get_launchable_programs(paths: &Vec<String>) -> Vec<SwitchType> {
+fn get_launchable_programs(paths: &Vec<String>, sender: &SkimItemSender) {
     paths
         .iter()
         .map(|path| std::fs::read_dir(path))
@@ -95,21 +74,25 @@ fn get_launchable_programs(paths: &Vec<String>) -> Vec<SwitchType> {
         .flatten()
         .sorted()
         .dedup()
-        .collect::<Vec<SwitchType>>()
+        .for_each(|item| {
+            let _ = sender.send(Arc::new(item));
+        });
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum SwitchType {
     Launch(String),
-    Focus(String),
+    Focus(Option<String>, Option<String>),
 }
 
 impl SwitchType {
-    fn action(&self, ipc: &mut Connection) {
+    fn action(&self, connection: &mut Connection) {
         match self {
-            SwitchType::Launch(name) => ipc.run_command(&format!("exec {}", name)).unwrap(),
-            SwitchType::Focus(name) => {
-                let temp: String = name
+            SwitchType::Launch(name) => {
+                connection.run_command(&format!("exec {}", name)).unwrap();
+            }
+            SwitchType::Focus(_, Some(title)) => {
+                let temp: String = title
                     .text()
                     .chars()
                     .map(|chars| match chars {
@@ -119,38 +102,44 @@ impl SwitchType {
                         _ => chars.to_string(),
                     })
                     .collect();
-                ipc.run_command(&format!("[title=\"{}\"] focus", temp))
-                    .unwrap()
+                connection
+                    .run_command(&format!("[title=\"{}\"] focus", temp))
+                    .unwrap();
             }
+            SwitchType::Focus(_, _) => {}
         };
     }
 }
 
 impl SkimItem for SwitchType {
-    fn display(&self) -> Cow<AnsiString> {
+    fn display(&self, _context: DisplayContext) -> AnsiString {
         match &self {
-            SwitchType::Launch(name) => {
-                Cow::Owned(AnsiString::parse(&format!("\x1b[32m{}\x1b[m", name)))
+            SwitchType::Launch(name) => AnsiString::parse(&format!("\x1b[32m{}\x1b[m", name)),
+            SwitchType::Focus(Some(program_name), Some(name)) => {
+                AnsiString::parse(&format!("\x1b[4m\x1b[34m{} - {}\x1b[m", program_name, name))
             }
-            SwitchType::Focus(name) => {
-                Cow::Owned(AnsiString::parse(&format!("\x1b[4m\x1b[34m{}\x1b[m", name)))
+            SwitchType::Focus(None, Some(name)) => {
+                AnsiString::parse(&format!("\x1b[4m\x1b[34m{}\x1b[m", name))
             }
+            SwitchType::Focus(_, _) => AnsiString::parse(" NONE "),
         }
     }
     fn text(&self) -> Cow<str> {
         match &self {
             SwitchType::Launch(name) => Cow::Borrowed(name),
-            SwitchType::Focus(name) => Cow::Borrowed(name),
+            SwitchType::Focus(_, Some(title)) => Cow::Borrowed(title),
+            SwitchType::Focus(_, _) => Cow::Borrowed(" NONE "),
         }
     }
-    fn preview(&self) -> ItemPreview {
+    fn preview(&self, _context: PreviewContext) -> ItemPreview {
         match &self {
             SwitchType::Launch(name) => {
                 ItemPreview::AnsiText(format!("\x1b[4m\x1b[32mLaunch:\x1b[m\n{}", name))
             }
-            SwitchType::Focus(name) => {
-                ItemPreview::AnsiText(format!("\x1b[4m\x1b[34mFocus:\x1b[m\n{}", name))
+            SwitchType::Focus(_, Some(title)) => {
+                ItemPreview::AnsiText(format!("\x1b[4m\x1b[34mFocus:\x1b[m\n{}", title))
             }
+            SwitchType::Focus(_, _) => ItemPreview::AnsiText(" NONE ".to_string()),
         }
     }
 }
