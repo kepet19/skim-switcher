@@ -35,16 +35,19 @@ fn main() {
 }
 
 fn get_running_programs_from_sway(connection: &mut Connection, sender: &SkimItemSender) {
-    let tree = connection.get_tree().expect("No tree en sway");
-    tree.nodes
-        .iter()
-        .flat_map(|workspace| &workspace.nodes)
-        .flat_map(|workspace_node| &workspace_node.nodes)
-        // .flat_map(|maybe_program| maybe_program.name.as_ref())
-        .map(|program| SwitchType::Focus(program.app_id.clone(), program.name.clone()))
-        .for_each(|switcher| {
-            let _ = sender.send(Arc::new(switcher));
-        });
+    if let Ok(tree) = connection.get_tree() {
+        tree.nodes
+            .iter()
+            .flat_map(|workspace| &workspace.nodes)
+            .flat_map(|workspace_node| &workspace_node.nodes)
+            // .flat_map(|maybe_program| maybe_program.name.as_ref())
+            .map(|program| SwitchType::Focus(program.app_id.clone(), program.name.clone()))
+            .for_each(|switcher| {
+                let _ = sender.send(Arc::new(switcher));
+            });
+    } else {
+        error!("There is no tree in sway?");
+    }
 }
 
 fn get_paths_to_bin() -> Vec<String> {
